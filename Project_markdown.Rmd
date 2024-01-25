@@ -1,0 +1,196 @@
+---
+title: "PH 1831"
+output:
+  html_document:
+    df_print: paged
+date: "2022-12-03"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(survival)
+```
+
+# Variables Key
+futime   = number of days between registration and the earlier of death and censoring
+status   = 0=censored; 1=died.
+age      = age in years
+drug     = 0=placebo, 1=treatment
+sex      = 0=male, 1=female
+ascites  = presence of ascites: 0=no 1=yes
+hepato   = presence of hepatomegaly 0=no 1=yes
+spiders  = presence of spiders 0=no 1=yes
+edema    = presence of edema 0=no edema and no diuretic therapy for edema;
+          .5 = edema present without diuretics, or edema resolved by diuretics;
+           1 = edema despite diuretic therapy
+bili     = serum bilirubin in mg/dl
+chol     = serum cholesterol in mg/dl
+albumin  = albumin in gm/dl
+copper   = urine copper in ug/day
+alk_phos = alkaline phosphatase in U/liter
+sgot     = SGOT in U/ml
+trig     = triglicerides in mg/dl
+platelet = platelets per cubic ml/1000
+protime  = prothrombin time in seconds
+stage    = histologic stage of disease
+
+
+```{r}
+data<- read.csv("/Users/shefalipatel/Documents/Fall 2022/Survival Analysis/Project/PBC276.csv")
+(data)
+```
+
+```{r}
+#determine variable type
+str(data)
+#summary stats for numeric variables
+data_numeric <- data[,-c(3,4,6,7,8,9,10)]
+summary(data_numeric)
+#frequency table for binary variables 
+data_binary <- data[,c(3,4,6,7,8,9,10)]
+data_binary
+apply((data_binary), 2, table)
+```
+
+
+```{r}
+#subset by drug = 1
+data_1 <- subset(data, drug == 1)
+data_1
+# subset by drug = 0 
+data_0 <- subset(data, drug == 0)
+data_0
+```
+
+```{r}
+#univariate split by drug 
+bivariate <- c(3,4,6,7,8,9,10)
+summary(data_0[,-bivariate])
+apply((data_0[,bivariate]), 2, table)
+summary(data_1[,-bivariate])
+apply((data_1[,bivariate]), 2, table)
+```
+
+```{r}
+colnames(data)
+```
+
+```{r}
+#make intial model
+res.cox <- coxph(Surv(futime, status) ~ factor(drug) + age + factor(sex) + factor(ascites) + factor(hepato) + factor(spiders) + factor(edema) + bili
+                 + chol + albumin + copper + alk_phos + sgot + trig + platelet + protime + stage, data =  data)
+res.cox
+summary(res.cox)
+```
+
+```{r}
+plot(survfit(res.cox), ylab="Probability of Survival", xlab="Days", 
+     col=c("red", "black", "black"))
+```
+
+
+```{r}
+#stepwise
+step(res.cox)
+```
+
+```{r}
+res.cox.selected <- coxph(formula = Surv(futime, status) ~ age + factor(edema) + 
+    bili + albumin + copper + sgot + protime + stage, data = data)
+res.cox.selected
+summary(res.cox.selected)
+
+```
+
+```{r}
+plot(survfit(res.cox.selected), ylab="Probability of Survival", xlab="Days", 
+     col=c("red", "black", "black"))
+```
+
+```{r}
+median(data$copper)
+median(data$sgot)
+median(data$protime)
+data$copper_split <- ifelse(data$copper > 74, 1, 0)
+data$sgot_split <- ifelse(data$sgot > 116.625, 1, 0)
+data$protime_split <- ifelse(data$protime > 10.6, 1, 0)
+```
+
+
+```{r}
+library(survminer)
+ggcoxdiagnostics(res.cox.selected, type = c("martingale"))
+ggcoxfunctional(Surv(futime, status) ~ age  + 
+    bili + albumin + copper + sgot + protime + stage, data = data, fit=res.cox.selected)
+#age and bili and albumin potential linearity 
+#copper, sgot, protime show non-linearity, discretized version needed 
+#edema factor 1 not able to be plotted using ggcoxfunctional command
+```
+```{r}
+res.cox.transformed <- coxph(formula = Surv(futime, status) ~ age + factor(edema) + 
+    log(bili) + albumin + factor(copper_split) + factor(sgot_split) + factor(protime_split) + stage, data = data)
+res.cox.transformed
+ggcoxdiagnostics(res.cox.transformed, type = c("martingale"))
+ggcoxfunctional(Surv(futime, status) ~ age + 
+    log(bili) + albumin + stage, data = data, fit=res.cox.transformed)
+
+```
+
+
+```{r}
+test.ph <- cox.zph(res.cox.transformed)
+test.ph
+ggcoxdiagnostics(res.cox.transformed, type = c("schoenfeld"))
+
+```
+
+
+```{r}
+ggcoxdiagnostics(res.cox.transformed, type = c("deviance"))
+
+```
+
+
+```{r}
+ggcoxdiagnostics(res.cox.transformed, type = c("dfbeta"))
+
+```
+
+
+```{r}
+data$resid_mart <- residuals(res.cox.transformed, type = "martingale")
+## Cox-Snell residuals
+data$resid_coxsnell <- -(data$resid_mart - data$status)
+
+
+## Fit model on Cox-Snell residuals (Approximately Expo(1) distributed under correct model)
+fit_coxsnell <- coxph(formula = Surv(resid_coxsnell, status) ~ 1,
+                      data    = data,
+                      ties    = c("efron","breslow","exact")[1])
+
+## Nelson-Aalen estimator for baseline hazard (all covariates zero)
+df_base_haz <- basehaz(fit_coxsnell, centered = FALSE)
+
+```
+
+
+```{r}
+ggplot(data = df_base_haz, mapping = aes(x = time, y = hazard)) +
+    geom_point() +
+    scale_x_continuous(limit = c(0,3.5)) +
+    scale_y_continuous(limit = c(0,3.5)) +
+    labs(x = "Cox-Snell residuals as pseudo observed times",
+         y = "Estimated cumulative hazard at pseudo observed times") +
+    theme_bw() + theme(legend.key = element_blank())
+
+```
+
+```{r}
+plot(survfit(res.cox.transformed), ylab="Probability of Survival", xlab="Days", 
+     col=c("red", "black", "black"))
+```
+
+```{r}
+summary(res.cox.transformed)
+```
+
